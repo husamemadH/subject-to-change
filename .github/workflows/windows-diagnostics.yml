@@ -1,0 +1,64 @@
+name: Windows inference diagnostics
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: false
+      - run: uv run --no-project python packaging/prepare_ffmpeg.py
+      - run: uv sync --frozen --extra model
+      - name: Prepare model and diagnostic script
+        shell: bash
+        run: |
+          uv run --frozen --extra model python -c "from pathlib import Path; from subject_to_change.embeddings import download_model; download_model(Path('build/check-model'))"
+          cat > build/diagnose.py <<'PY'
+          import faulthandler
+          import os
+          import sys
+          from pathlib import Path
+          faulthandler.enable()
+          from subject_to_change.runtime import configure_native_libraries
+          configure_native_libraries()
+          import torch
+          from sentence_transformers import SentenceTransformer
+          from PIL import Image
+          mode = sys.argv[1]
+          print('PROFILE', mode, 'CPU', torch.backends.cpu.get_cpu_capability(), flush=True)
+          if mode == 'no-mkldnn':
+              torch.backends.mkldnn.enabled = False
+          if mode == 'one-thread':
+              torch.set_num_threads(1)
+          options = {'dtype': 'float32', 'use_safetensors': True}
+          if mode == 'eager':
+              options['attn_implementation'] = 'eager'
+          model = SentenceTransformer('build/check-model', device='cpu', local_files_only=True, model_kwargs=options)
+          print('MODEL LOADED', flush=True)
+          print('TEXT', model.encode(['An invoice that is due.'], show_progress_bar=False).shape, flush=True)
+          print('IMAGE', model.encode([{'image': Image.new('RGB', (64,32), 'blue')}], prompt='', show_progress_bar=False).shape, flush=True)
+          print('VIDEO', model.encode([{'video': [Image.new('RGB', (64,32), 'blue')]*2}], prompt='', show_progress_bar=False, processing_kwargs={'video': {'max_frames': 10, 'fps': None, 'max_soft_tokens': 140}}).shape, flush=True)
+          import numpy as np
+          print('AUDIO', model.encode([{'audio': np.zeros(32000, dtype=np.float32)}], prompt='', show_progress_bar=False).shape, flush=True)
+          PY
+      - name: Compare CPU backends in separate processes
+        shell: pwsh
+        run: |
+          foreach ($mode in @('default', 'eager', 'no-mkldnn', 'one-thread')) {
+            Write-Output "PROFILE $mode"
+            uv run --frozen --extra model python -u build/diagnose.py $mode *> "build/$mode.log"
+            Write-Output "EXIT $LASTEXITCODE"
+            Get-Content "build/$mode.log"
+          }
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-inference-diagnostics
+          path: build/*.log

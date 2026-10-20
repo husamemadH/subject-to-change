@@ -197,7 +197,9 @@ class IndexTask(Task):
                                 self.cancel.wait(0.05)
                         if not outcome:
                             diagnostics.seek(0)
-                            detail = diagnostics.read().decode(errors="replace")[-2000:]
+                            detail = diagnostics.read().decode(errors="replace")
+                            if len(detail) > 12000:
+                                detail = detail[:9000] + "\n…\n" + detail[-3000:]
                             self.failed.emit(
                                 f"Indexing process exited ({process.returncode})\n{detail}".strip()
                             )
