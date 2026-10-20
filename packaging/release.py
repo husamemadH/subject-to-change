@@ -92,20 +92,16 @@ def appimage(payload: Path, output: Path, release_version: str) -> Path:
         subprocess.run(
             [str(tool), "--appimage-extract"], cwd=temporary, check=True, stdout=subprocess.DEVNULL
         )
-        # The tool's bundled compressor only supports zstd. Use the system compressor
-        # for xz so the GPU runtime fits GitHub's per-file release limit.
-        compressor = shutil.which("mksquashfs")
-        if compressor is None:
-            raise RuntimeError("Install squashfs-tools before building an AppImage")
-        for bundled in (temporary / "squashfs-root").rglob("mksquashfs"):
-            bundled.unlink()
-            bundled.symlink_to(compressor)
         command = [
             str(temporary / "squashfs-root/AppRun"),
             "--runtime-file",
             str(runtime),
             "--comp",
-            "xz",
+            "zstd",
+            "--mksquashfs-opt",
+            "-Xcompression-level",
+            "--mksquashfs-opt",
+            "22",
             "--mksquashfs-opt",
             "-b",
             "--mksquashfs-opt",
