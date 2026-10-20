@@ -69,6 +69,96 @@ class EngineTests(unittest.TestCase):
         path.write_text(content, encoding="utf-8")
         return path
 
+    def test_progress_counts_unchanged_and_unreadable_files(self) -> None:
+        self.file("ready.txt", "cat")
+        self.engine.index([self.root], semantic=False)
+        self.file("broken.pdf", "not a pdf")
+        events = []
+        report = self.engine.index([self.root], semantic=False, on_progress=events.append)
+        self.assertEqual((report.unchanged, report.skipped), (1, 1))
+        self.assertEqual((events[-1].completed, events[-1].total), (2, 2))
+        self.assertEqual(events[-1].phase, "Finished")
+        self.assertEqual([e.completed for e in events], sorted(e.completed for e in events))
+
+    def test_progress_updates_each_embedding_batch(self) -> None:
+        self.file("long.txt", "cat garden " * 3000)
+        events = []
+        self.engine.index([self.root], on_progress=events.append)
+        batches = [e for e in events if e.phase == "Embedding"]
+        self.assertGreater(len(batches), 2)
+        self.assertEqual(batches[0].passages_done, 0)
+        self.assertEqual(batches[1].passages_done, 16)
+        self.assertEqual(batches[-1].passages_done, batches[-1].passages_total)
+        self.assertTrue(all(e.completed == 0 and e.total == 1 for e in batches))
+        self.assertEqual(events[-1].completed, 1)
+
+    def test_cancelled_progress_does_not_claim_completion(self) -> None:
+        self.file("long.txt", "cat garden " * 3000)
+        cancel = Event()
+        events = []
+
+        def update(event):
+            events.append(event)
+            if event.passages_done >= 16:
+                cancel.set()
+
+        report = self.engine.index([self.root], cancel=cancel, on_progress=update)
+        self.assertTrue(report.cancelled)
+        self.assertEqual(events[-1].phase, "Stopped")
+        self.assertEqual(events[-1].completed, 0)
+        self.assertEqual(self.engine.stats()["files"], 0)
+
+    def test_native_media_vectors_and_timestamps_are_indexed(self) -> None:
+        from subject_to_change.media import MediaPart
+
+        self.file("recording.mp4", "video fixture")
+        encoder = self.encoder
+        encoder.encode_media = lambda inputs: [0.0, 1.0, 0.0, 0.0]
+        parts = [
+            MediaPart({"video": ["frame1"]}, "Video · 00:00:00–00:00:10", 1, 2),
+            MediaPart({"video": ["frame2"]}, "Video · 00:00:10–00:00:20", 2, 2),
+        ]
+        events = []
+        with patch("subject_to_change.engine.read_media", return_value=iter(parts)):
+            report = self.engine.index([self.root], on_progress=events.append)
+        self.assertEqual(report.indexed, 1)
+        self.assertEqual(self.engine.stats()["embedded"], 2)
+        results = self.engine.search("lease")
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].location.startswith("Video · "))
+        clips = [e for e in events if e.phase == "Embedding video"]
+        self.assertEqual(clips[-1].passages_done, 2)
+        with patch("subject_to_change.engine.read_media", side_effect=AssertionError("Unchanged")):
+            self.assertEqual(self.engine.index([self.root]).unchanged, 1)
+
+    def test_corrupt_media_is_reported_without_stopping_other_files(self) -> None:
+        from subject_to_change.media import MediaReadError
+
+        self.file("broken.jpg", "corrupt image")
+        self.file("note.txt", "cat")
+        with patch(
+            "subject_to_change.engine.read_media", side_effect=MediaReadError("Invalid image")
+        ):
+            report = self.engine.index([self.root])
+        self.assertEqual((report.indexed, report.skipped), (1, 1))
+        self.assertIn("Invalid image", report.errors[0])
+
+    def test_keyword_mode_indexes_media_filenames_without_decoding(self) -> None:
+        self.file("garden_flowers.jpg", "not decoded")
+        with patch("subject_to_change.engine.read_media", side_effect=AssertionError("No decoder")):
+            report = self.engine.index([self.root], semantic=False)
+        self.assertEqual(report.indexed, 1)
+        self.assertEqual(len(self.engine.search("flowers", semantic=False)), 1)
+        self.assertEqual(self.engine.stats()["embedded"], 0)
+
+    def test_stats_remain_readable_while_another_connection_is_writing(self) -> None:
+        self.file("note.txt", "invoice")
+        self.engine.index([self.root], semantic=False)
+        with Store(self.paths.database) as writer:
+            writer.connection.execute("BEGIN IMMEDIATE")
+            self.assertEqual(self.engine.stats()["files"], 1)
+            writer.connection.rollback()
+
     def test_keyword_index_search_requires_no_model(self) -> None:
         path = self.file("فاتورة invoice.txt", "Payment declined. Invoice ABC-123 is overdue.")
         with patch("socket.create_connection", side_effect=AssertionError("Network forbidden")):
@@ -182,7 +272,7 @@ class EngineTests(unittest.TestCase):
         self.file(".ssh/notes.txt", "Secret needle")
         self.file("node_modules/notes.txt", "Secret needle")
         self.file("credentials.json", "Secret needle")
-        self.file("image.png", "Secret needle")
+        self.file("unsupported.bin", "Secret needle")
         outside = self.root.parent / "outside.txt"
         outside.write_text("Secret needle", encoding="utf-8")
         try:

@@ -68,8 +68,11 @@ class Store(AbstractContextManager):
         if version is not None and version[0] != "1":
             self.connection.close()
             raise ValueError("This index was created by a different application version")
-        with self.connection:
-            self.connection.execute("INSERT OR IGNORE INTO metadata VALUES ('schema_version', '1')")
+        if version is None:
+            with self.connection:
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO metadata VALUES ('schema_version', '1')"
+                )
 
     def __exit__(self, *args) -> None:
         self.connection.close()

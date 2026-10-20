@@ -6,7 +6,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from subject_to_change.readers import Passage, chunk_passage, read_document
+from subject_to_change.readers import Passage, allowed, chunk_passage, media_kind, read_document
 
 
 class ReaderTests(unittest.TestCase):
@@ -14,6 +14,15 @@ class ReaderTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def test_media_and_code_extensions_are_accepted(self) -> None:
+        for name, kind in (("photo.JPG", "image"), ("clip.webm", "video"), ("sound.flac", "audio")):
+            self.assertTrue(allowed(Path(name)))
+            self.assertEqual(media_kind(Path(name)), kind)
+        for name in ("app.py", "app.ts", "config.yaml", "data.json"):
+            self.assertTrue(allowed(Path(name)))
+            self.assertIsNone(media_kind(Path(name)))
+        self.assertFalse(allowed(Path("program.exe")))
 
     def test_chunks_cover_all_words_with_overlap_and_page_locations(self) -> None:
         text = " ".join(f"word{i:04}" for i in range(500))

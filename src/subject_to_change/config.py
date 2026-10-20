@@ -34,7 +34,7 @@ class AppPaths:
 
     @property
     def model(self) -> Path:
-        return self.data / "models" / "multilingual-e5-small"
+        return self.data / "models" / "embeddinggemma-2"
 
 
 def write_json(path: Path, value: dict) -> None:

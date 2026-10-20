@@ -56,7 +56,38 @@ class OfflineTests(unittest.TestCase):
         with self.assertRaisesRegex(ModelUnavailable, "damaged"):
             verify_model(self.folder)
 
-    def test_runtime_is_local_only_and_uses_e5_prefixes(self) -> None:
+    def test_model_load_on_gpu_failure_retries_on_cpu_and_reports_it(self) -> None:
+        from unittest.mock import Mock
+
+        from subject_to_change.device import ComputeDevice
+
+        fixture_model(self.folder)
+        runtime = Mock()
+        labels = []
+        attempts = []
+
+        def create_model(path, **kwargs):
+            attempts.append(kwargs["device"])
+            if kwargs["device"] == "cuda":
+                raise RuntimeError("CUDA out of memory")
+            return runtime
+
+        sentence_module = types.SimpleNamespace(SentenceTransformer=create_model)
+        torch_module = types.SimpleNamespace(cuda=types.SimpleNamespace(empty_cache=Mock()))
+        with patch.dict(
+            "sys.modules", {"sentence_transformers": sentence_module, "torch": torch_module}
+        ):
+            with patch(
+                "subject_to_change.embeddings.detect_device",
+                return_value=ComputeDevice("cuda", "GPU"),
+            ):
+                embedder = LocalEmbedder(self.folder, on_device=labels.append)
+                embedder._load()
+        self.assertEqual(attempts, ["cuda", "cpu"])
+        self.assertEqual(embedder.device.name, "cpu")
+        self.assertIn("GPU could not load", labels[-1])
+
+    def test_runtime_is_local_only_and_uses_gemma_retrieval_prompts(self) -> None:
         fixture_model(self.folder)
         calls = []
 
@@ -82,8 +113,11 @@ class OfflineTests(unittest.TestCase):
         self.assertTrue(calls[0][1]["local_files_only"])
         self.assertFalse(calls[0][1]["trust_remote_code"])
         self.assertTrue(calls[0][1]["model_kwargs"]["use_safetensors"])
-        self.assertEqual(calls[1][0], ["passage: rent"])
-        self.assertEqual(calls[2][0], ["query: lease"])
+        self.assertEqual(calls[1][0], ["rent"])
+        self.assertEqual(calls[1][1]["prompt_name"], "document")
+        self.assertEqual(calls[2][0], ["lease"])
+        self.assertEqual(calls[2][1]["prompt_name"], "query")
+        self.assertNotIn("config_kwargs", calls[0][1])
 
 
 if __name__ == "__main__":

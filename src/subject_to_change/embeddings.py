@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import math
@@ -12,17 +13,18 @@ from threading import Lock
 from typing import Protocol
 
 from .config import write_json
+from .device import ComputeDevice, detect_device
 
 
 @dataclass(frozen=True)
 class ModelSpec:
-    repository: str = "intfloat/multilingual-e5-small"
-    revision: str = "fd1525a9fd15316a2d503bf26ab031a61d056e98"
-    dimensions: int = 384
+    repository: str = "google/embeddinggemma-2"
+    revision: str = "914f7f89142e33e77833254d9c9b90c3cef7303b"
+    dimensions: int = 768
 
     @property
     def identity(self) -> str:
-        return f"{self.repository}@{self.revision}:e5-prefixes:v1"
+        return f"{self.repository}@{self.revision}:retrieval-prompts:v1"
 
 
 MODEL = ModelSpec()
@@ -30,6 +32,12 @@ REQUIRED_FILES = (
     "config.json",
     "modules.json",
     "1_Pooling/config.json",
+    "2_Normalize/config.json",
+    "config_sentence_transformers.json",
+    "preprocessor_config.json",
+    "processor_config.json",
+    "chat_template.jinja",
+    "tokenizer.model",
     "model.safetensors",
     "tokenizer.json",
     "tokenizer_config.json",
@@ -47,6 +55,8 @@ class Embedder(Protocol):
     dimensions: int
 
     def encode(self, texts: list[str], *, query: bool = False) -> list[list[float]]: ...
+
+    def encode_media(self, inputs: dict) -> list[float]: ...
 
 
 def normalize(vector: list[float], dimensions: int) -> list[float]:
@@ -99,7 +109,7 @@ def download_model(folder: Path, progress: Callable[[str], None] = lambda _: Non
     folder.mkdir(parents=True, exist_ok=True)
     repair = (folder / MARKER).exists()
     (folder / MARKER).unlink(missing_ok=True)
-    progress("Downloading the text model (about 500 MB). An interrupted download can be retried.")
+    progress("Downloading the text model (about 1.5 GB). An interrupted download can be retried.")
     snapshot_download(
         repo_id=MODEL.repository,
         revision=MODEL.revision,
@@ -107,8 +117,10 @@ def download_model(folder: Path, progress: Callable[[str], None] = lambda _: Non
         allow_patterns=[
             "*.json",
             "*.safetensors",
-            "sentencepiece.bpe.model",
+            "tokenizer.model",
+            "chat_template.jinja",
             "1_Pooling/*.json",
+            "2_Normalize/*.json",
         ],
         token=False,
         max_workers=2,
@@ -131,13 +143,17 @@ class LocalEmbedder:
     identity = MODEL.identity
     dimensions = MODEL.dimensions
 
-    def __init__(self, folder: Path) -> None:
+    def __init__(self, folder: Path, on_device: Callable[[str], None] = lambda _: None) -> None:
         self.folder = folder
+        self.on_device = on_device
+        self.device: ComputeDevice | None = None
         self._model = None
         self._lock = Lock()
 
     def _load(self) -> None:
         verify_model(self.folder)
+        self.device = self.device or detect_device()
+        self.on_device(self.device.label)
         os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
         os.environ["DO_NOT_TRACK"] = "1"
         try:
@@ -146,14 +162,50 @@ class LocalEmbedder:
             raise ModelUnavailable(
                 "Install model support with: pip install -e '.[model]'"
             ) from error
-        self._model = SentenceTransformer(
-            str(self.folder),
-            device="cpu",
-            local_files_only=True,
-            trust_remote_code=False,
-            model_kwargs={"use_safetensors": True},
-        )
-        self._model.max_seq_length = 512
+        try:
+            self._model = SentenceTransformer(
+                str(self.folder),
+                device=self.device.name,
+                local_files_only=True,
+                trust_remote_code=False,
+                model_kwargs={"use_safetensors": True, "dtype": "float32"},
+            )
+        except RuntimeError:
+            if self.device.name == "cpu":
+                raise
+            self._fallback_to_cpu("GPU could not load the model")
+            return
+        self._model.max_seq_length = 8192
+
+    def _fallback_to_cpu(self, reason: str) -> None:
+        self._model = None
+        gc.collect()
+        import torch
+
+        if self.device is not None and self.device.name == "cuda":
+            try:
+                torch.cuda.empty_cache()
+            except RuntimeError:
+                pass  # A failed GPU must not prevent the CPU retry.
+        self.device = ComputeDevice("cpu", f"CPU · {reason}")
+        self._load()
+
+    def _encode(self, inputs, **kwargs):
+        try:
+            return self._model.encode(inputs, **kwargs)
+        except RuntimeError as error:
+            if self.device is None or self.device.name == "cpu":
+                raise
+            message = str(error).lower()
+            if not any(
+                term in message for term in ("out of memory", "cuda", "cudnn", "hip", "mps")
+            ):
+                raise
+            reason = (
+                "GPU ran out of memory" if "out of memory" in message else "GPU inference failed"
+            )
+            self._fallback_to_cpu(reason)
+            return self._model.encode(inputs, **kwargs)
 
     def encode(self, texts: list[str], *, query: bool = False) -> list[list[float]]:
         if not texts:
@@ -161,11 +213,27 @@ class LocalEmbedder:
         with self._lock:
             if self._model is None:
                 self._load()
-            prefix = "query: " if query else "passage: "
-            vectors = self._model.encode(
-                [prefix + text for text in texts],
+            vectors = self._encode(
+                texts,
+                prompt_name="query" if query else "document",
                 batch_size=16,
                 normalize_embeddings=True,
                 show_progress_bar=False,
             )
             return [normalize(vector.tolist(), self.dimensions) for vector in vectors]
+
+    def encode_media(self, inputs: dict) -> list[float]:
+        with self._lock:
+            if self._model is None:
+                self._load()
+            vectors = self._encode(
+                [inputs],
+                prompt="",
+                batch_size=1,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+                processing_kwargs={
+                    "video": {"max_frames": 10, "fps": None, "max_soft_tokens": 140},
+                },
+            )
+            return normalize(vectors[0].tolist(), self.dimensions)

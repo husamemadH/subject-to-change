@@ -10,3 +10,5 @@ dist/
 *.sqlite*
 .coverage
 models/
+
+packaging/vendor/

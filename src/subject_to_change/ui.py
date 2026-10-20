@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QCloseEvent, QDesktopServices, QFont, QKeySequence, QShortcut
+from PySide6.QtCore import QProcess, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QCloseEvent,
+    QDesktopServices,
+    QFont,
+    QImageReader,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -22,15 +35,24 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSlider,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from .config import APP_NAME, AppPaths, Settings, canonical_folders
 from .desktop import reveal_file
-from .embeddings import download_model, model_ready
-from .engine import Engine, IndexReport
+from .embeddings import LocalEmbedder, download_model, model_ready
+from .engine import Engine, IndexProgress, IndexReport
+from .readers import media_kind
+from .runtime import (
+    configure_native_libraries,
+    ensure_standard_streams,
+    helper_command,
+    process_options,
+)
 from .storage import SearchResult
 
 STYLE = """
@@ -62,8 +84,36 @@ QSplitter::handle { background: transparent; width: 12px; }
 """
 
 
+class ImagePreview(QLabel):
+    def __init__(self):
+        super().__init__()
+        self.original = QPixmap()
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumSize(1, 1)
+
+    def set_image(self, image):
+        self.original = QPixmap.fromImage(image)
+        self._fit()
+
+    def _fit(self):
+        self.setPixmap(
+            self.original.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self.original.isNull():
+            self._fit()
+
+
 class Task(QThread):
     progress = Signal(str)
+    indexing_progress = Signal(object)
+    device_changed = Signal(str)
     succeeded = Signal(object)
     failed = Signal(str)
 
@@ -74,16 +124,98 @@ class Task(QThread):
 
     def run(self) -> None:
         try:
-            self.succeeded.emit(self.operation(self.progress.emit, self.cancel))
+            self.succeeded.emit(
+                self.operation(self.progress.emit, self.cancel, self.indexing_progress.emit)
+            )
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class IndexTask(Task):
+    def __init__(self, paths: AppPaths, folders: list[str], semantic: bool, parent=None):
+        super().__init__(lambda *args: None, parent)
+        self.request = {"data": str(paths.data), "folders": folders, "semantic": semantic}
+
+    def run(self) -> None:
+        process = None
+        try:
+            with tempfile.TemporaryDirectory(prefix="subject-to-change-worker-") as directory:
+                base = Path(directory)
+                request, events, errors = (
+                    base / name for name in ("request.json", "events.jsonl", "errors.log")
+                )
+                request.write_text(json.dumps(self.request), encoding="utf-8")
+                events.touch()
+                with events.open("rb") as output, errors.open("w+b") as diagnostics:
+                    try:
+                        process = subprocess.Popen(
+                            helper_command("index", request, events, errors),
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=diagnostics,
+                            **process_options(),
+                        )
+                        buffer = b""
+                        outcome = False
+                        while True:
+                            if self.cancel.is_set():
+                                process.terminate()
+                                try:
+                                    process.wait(timeout=0.5)
+                                except subprocess.TimeoutExpired:
+                                    process.kill()
+                                    process.wait()
+                                self.succeeded.emit(IndexReport(cancelled=True))
+                                return
+                            chunk = output.read(65536)
+                            buffer += chunk
+                            while b"\n" in buffer:
+                                line, buffer = buffer.split(b"\n", 1)
+                                message = json.loads(line)
+                                kind, value = message["kind"], message["value"]
+                                if kind == "device":
+                                    self.device_changed.emit(value)
+                                elif kind == "progress":
+                                    self.progress.emit(value)
+                                elif kind == "indexing_progress":
+                                    self.indexing_progress.emit(IndexProgress(**value))
+                                elif kind == "succeeded":
+                                    self.succeeded.emit(IndexReport(**value))
+                                    outcome = True
+                                elif kind == "failed":
+                                    self.failed.emit(value)
+                                    outcome = True
+                            if not chunk:
+                                if process.poll() is not None:
+                                    # The child may have appended its final event after our read.
+                                    chunk = output.read(65536)
+                                    if chunk:
+                                        output.seek(-len(chunk), 1)
+                                        continue
+                                    break
+                                self.cancel.wait(0.05)
+                        if not outcome:
+                            diagnostics.seek(0)
+                            detail = diagnostics.read().decode(errors="replace")[-2000:]
+                            self.failed.emit(
+                                detail or f"Indexing process exited ({process.returncode})"
+                            )
+                    finally:
+                        if process is not None:
+                            if process.poll() is None:
+                                process.kill()
+                            process.wait()
         except Exception as error:
             self.failed.emit(str(error))
 
 
 class MainWindow(QMainWindow):
+    device_changed = Signal(str)
+
     def __init__(self, paths: AppPaths) -> None:
         super().__init__()
         self.paths = paths
-        self.engine = Engine(paths)
+        self.engine = Engine(paths, LocalEmbedder(paths.model, on_device=self.device_changed.emit))
         self.settings = Settings.load(paths.settings)
         self.task: Task | None = None
         self.task_kind = ""
@@ -95,6 +227,14 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(850, 580)
         self._build()
         self._refresh()
+        self._runtime_device_known = False
+        self.device_changed.connect(self._set_device)
+        self._device_directory = tempfile.TemporaryDirectory(prefix="subject-to-change-device-")
+        self._device_result = Path(self._device_directory.name) / "device.json"
+        self.device_probe = QProcess(self)
+        self.device_probe.finished.connect(self._device_detected)
+        command = helper_command("device", self._device_result)
+        self.device_probe.start(command[0], command[1:])
         QShortcut(QKeySequence("Ctrl+L"), self, activated=self.query.setFocus)
         self.query.setFocus()
 
@@ -147,8 +287,8 @@ class MainWindow(QMainWindow):
         self.clear_button.clicked.connect(self._clear)
         side.addWidget(self.clear_button)
         scope = QLabel(
-            "Reads TXT, Markdown, PDF, DOCX, ODT, HTML and CSV.\n\n"
-            "This first version searches text. Images, audio and video come later."
+            "Search images, audio, video, documents and code.\n\n"
+            "Audio and video are indexed in clips. Exact words searches media filenames only."
         )
         scope.setWordWrap(True)
         scope.setObjectName("muted")
@@ -167,10 +307,14 @@ class MainWindow(QMainWindow):
         model_row.addWidget(self.model_label, 1)
         model_row.addWidget(self.download_button)
         main.addLayout(model_row)
+        self.device_label = QLabel("Compute · detecting GPU…")
+        self.device_label.setObjectName("muted")
+        self.device_label.setWordWrap(True)
+        main.addWidget(self.device_label)
 
         search_row = QHBoxLayout()
         self.query = QLineEdit()
-        self.query.setPlaceholderText("Describe a document, or enter keywords…")
+        self.query.setPlaceholderText("Describe an image, recording or document…")
         self.query.setClearButtonEnabled(True)
         self.query.returnPressed.connect(self._search)
         self.search_button = QPushButton("Search")
@@ -200,8 +344,47 @@ class MainWindow(QMainWindow):
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
         self.preview.setPlaceholderText("Select a result to read its matching passage.")
+        self.preview_stack = QStackedWidget()
+        self.preview_stack.addWidget(self.preview)
+        self.image_preview = ImagePreview()
+        self.preview_stack.addWidget(self.image_preview)
+        self.media_preview = QWidget()
+        media_layout = QVBoxLayout(self.media_preview)
+        self.video_preview = QVideoWidget()
+        media_layout.addWidget(self.video_preview, 1)
+        self.media_caption = QLabel()
+        self.media_caption.setTextFormat(Qt.TextFormat.PlainText)
+        self.media_caption.setWordWrap(True)
+        media_layout.addWidget(self.media_caption)
+        controls = QHBoxLayout()
+        self.play_button = QPushButton("Play")
+        self.play_button.clicked.connect(self._toggle_playback)
+        controls.addWidget(self.play_button)
+        self.seek_slider = QSlider(Qt.Orientation.Horizontal)
+        controls.addWidget(self.seek_slider, 1)
+        self.playback_time = QLabel("00:00:00")
+        controls.addWidget(self.playback_time)
+        media_layout.addLayout(controls)
+        self.preview_stack.addWidget(self.media_preview)
+        self.player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.player.setAudioOutput(self.audio_output)
+        self.player.setVideoOutput(self.video_preview)
+        self.player.durationChanged.connect(lambda duration: self.seek_slider.setRange(0, duration))
+        self.player.positionChanged.connect(self._playback_position)
+        self.seek_slider.sliderMoved.connect(self.player.setPosition)
+        self.player.playbackStateChanged.connect(
+            lambda state: self.play_button.setText(
+                "Pause" if state == QMediaPlayer.PlaybackState.PlayingState else "Play"
+            )
+        )
+        self.player.errorOccurred.connect(
+            lambda error, message: self.status.setText(f"Preview unavailable: {message}")
+        )
+        self._preview_start_ms = 0
+        self.player.mediaStatusChanged.connect(self._media_loaded)
         split.addWidget(self.result_list)
-        split.addWidget(self.preview)
+        split.addWidget(self.preview_stack)
         split.setSizes([300, 160])
         main.addWidget(split, 1)
         actions = QHBoxLayout()
@@ -216,6 +399,11 @@ class MainWindow(QMainWindow):
             button.setEnabled(False)
         actions.addStretch()
         main.addLayout(actions)
+        self.indexing_status = QLabel()
+        self.indexing_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.indexing_status.setWordWrap(True)
+        self.indexing_status.hide()
+        outer.addWidget(self.indexing_status)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setTextVisible(False)
@@ -236,6 +424,20 @@ class MainWindow(QMainWindow):
         footer.addWidget(self.details_button)
         outer.addLayout(footer)
 
+    def _set_device(self, label: str) -> None:
+        self._runtime_device_known = True
+        self.device_label.setText(label)
+
+    def _device_detected(self, exit_code: int, exit_status) -> None:
+        try:
+            if not self._runtime_device_known:
+                output = self._device_result.read_text(encoding="utf-8")
+                self.device_label.setText(json.loads(output)["label"])
+        except (OSError, ValueError, KeyError):
+            self.device_label.setText("Compute · detected when model loads")
+        finally:
+            self._device_directory.cleanup()
+
     def _refresh(self) -> None:
         self.folders.clear()
         for folder in self.settings.folders:
@@ -245,9 +447,9 @@ class MainWindow(QMainWindow):
             self.folders.addItem(item)
         ready = model_ready(self.paths.model)
         self.model_label.setText(
-            "Text model installed · offline ready"
+            "EmbeddingGemma 2 installed · offline ready"
             if ready
-            else "No model downloaded · keyword search available"
+            else "EmbeddingGemma 2 not downloaded · keyword search available"
         )
         self.download_button.setText("Repair model…" if ready else "Download model…")
         self.download_button.setEnabled(self.task is None)
@@ -307,14 +509,26 @@ class MainWindow(QMainWindow):
         self.download_button.setEnabled(not busy)
         self.progress_bar.setVisible(busy)
         self.cancel_button.setVisible(busy and self.task_kind == "index")
+        self.cancel_button.setEnabled(busy)
+        self.cancel_button.setText("Stop indexing")
 
-    def _start(self, kind: str, operation: Callable) -> None:
+    def _start(self, kind: str, operation: Callable | None = None) -> None:
         if self.task is not None:
             return
         self.error.hide()
         self.task_kind = kind
-        self.task = Task(operation, self)
+        self.progress_bar.setRange(0, 0)
+        self.indexing_status.setVisible(kind == "index")
+        self.indexing_status.setText("Scanning folders…")
+        if kind == "index":
+            self.task = IndexTask(
+                self.paths, self.settings.folders.copy(), not self.keyword_only.isChecked(), self
+            )
+        else:
+            self.task = Task(operation, self)
         self.task.progress.connect(self.status.setText)
+        self.task.indexing_progress.connect(self._index_progress)
+        self.task.device_changed.connect(self._set_device)
         self.task.succeeded.connect(self._completed)
         self.task.failed.connect(self._failed)
         self.task.finished.connect(self._finished)
@@ -328,31 +542,43 @@ class MainWindow(QMainWindow):
         )
         self.task.start()
 
+    def _index_progress(self, value: IndexProgress) -> None:
+        if value.phase == "Scanning folders":
+            self.indexing_status.setText("Scanning folders…")
+            return
+        self.progress_bar.setRange(0, max(1, value.total))
+        self.progress_bar.setValue(value.completed)
+        percent = int(100 * value.completed / value.total) if value.total else 100
+        text = f"{value.completed} / {value.total} files · {percent}% · {value.phase}"
+        if value.filename:
+            text += f" · {value.filename}"
+        if value.passages_total:
+            unit = "clips" if value.phase in {"Embedding video", "Embedding audio"} else "passages"
+            if value.phase == "Embedding image":
+                unit = "images"
+            text += f" · {value.passages_done} / {value.passages_total} {unit}"
+        self.indexing_status.setText(text)
+
     def _index(self) -> None:
-        semantic = not self.keyword_only.isChecked()
-        folders = self.settings.folders.copy()
-        self._start(
-            "index",
-            lambda progress, cancel: self.engine.index(
-                folders,
-                semantic=semantic,
-                progress=progress,
-                cancel=cancel,
-            ),
-        )
+        self._start("index")
 
     def _search(self) -> None:
         query = self.query.text().strip()
         if not query or self.task is not None:
             return
         semantic = not self.keyword_only.isChecked()
-        self._start("search", lambda progress, cancel: self.engine.search(query, semantic=semantic))
+        self._start(
+            "search",
+            lambda progress, cancel, indexing_progress: self.engine.search(
+                query, semantic=semantic
+            ),
+        )
 
     def _download(self) -> None:
         answer = QMessageBox.question(
             self,
             "Download text model?",
-            "Download multilingual-e5-small (about 500 MB) from Hugging Face?\n\n"
+            "Download Google EmbeddingGemma 2 (about 1.5 GB) from Hugging Face?\n\n"
             "This is the only step that needs the internet. No files or searches are uploaded. "
             "After it finishes, uncheck Exact words only and index your folders again.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -360,7 +586,10 @@ class MainWindow(QMainWindow):
         )
         if answer == QMessageBox.StandardButton.Yes:
             self._start(
-                "download", lambda progress, cancel: download_model(self.paths.model, progress)
+                "download",
+                lambda progress, cancel, indexing_progress: download_model(
+                    self.paths.model, progress
+                ),
             )
 
     def _completed(self, value: object) -> None:
@@ -371,14 +600,23 @@ class MainWindow(QMainWindow):
             self._last_report = value
             self.details_button.setVisible(bool(value.errors))
             self.status.setText(
-                f"{'Stopped' if value.cancelled else 'Finished'} · {value.indexed} indexed · "
+                f"Finished · {value.indexed} indexed · "
                 f"{value.unchanged} unchanged · {value.removed} removed · {value.skipped} skipped"
             )
+            if not value.cancelled and not (value.indexed + value.unchanged + value.skipped):
+                self.status.setText(
+                    "No supported files found. Add images, audio, video or documents."
+                )
+            if value.cancelled:
+                self.status.setText("Indexing stopped · completed files kept. Ready to resume.")
+                self.indexing_status.setText(self.indexing_status.text() + " · Stopped")
             if value.errors:
                 self._show_error("Some files could not be read. See Indexing details.")
             self._update_stats()
         else:
-            self.engine = Engine(self.paths)
+            self.engine = Engine(
+                self.paths, LocalEmbedder(self.paths.model, on_device=self.device_changed.emit)
+            )
             self.status.setText("Model saved. Uncheck Exact words only, then index your folders.")
             self._refresh()
 
@@ -396,7 +634,9 @@ class MainWindow(QMainWindow):
     def _cancel(self) -> None:
         if self.task is not None:
             self.task.cancel.set()
-            self.status.setText("Stopping after the current step. Completed files will be kept.")
+            self.cancel_button.setEnabled(False)
+            self.cancel_button.setText("Stopping…")
+            self.status.setText("Stopping indexing… Completed files will be kept.")
 
     def _show_results(self, results: list[SearchResult]) -> None:
         self.results = results
@@ -421,9 +661,52 @@ class MainWindow(QMainWindow):
         selected = 0 <= row < len(self.results)
         for button in (self.open_button, self.reveal_button, self.copy_button):
             button.setEnabled(selected)
+        self.player.stop()
+        self.player.setSource(QUrl())
+        self.preview_stack.setCurrentWidget(self.preview)
         if selected:
             result = self.results[row]
+            kind = media_kind(Path(result.path))
             self.preview.setPlainText(f"{result.path}\n{result.location}\n\n{result.text}")
+            if kind == "image":
+                reader = QImageReader(result.path)
+                reader.setAutoTransform(True)
+                size = reader.size()
+                if size.isValid():
+                    reader.setScaledSize(
+                        size.scaled(QSize(800, 500), Qt.AspectRatioMode.KeepAspectRatio)
+                    )
+                image = reader.read()
+                self.image_preview.set_image(image)
+                self.image_preview.setToolTip(result.path)
+                self.preview_stack.setCurrentWidget(self.image_preview)
+            elif kind in {"audio", "video"}:
+                self.media_caption.setText(f"{Path(result.path).name} · {result.location}")
+                self.video_preview.setVisible(kind == "video")
+                self.preview_stack.setCurrentWidget(self.media_preview)
+                self._preview_start_ms = 0
+                if " · " in result.location:
+                    clock = result.location.split(" · ", 1)[1].split("–", 1)[0]
+                    hours, minutes, seconds = map(int, clock.split(":"))
+                    self._preview_start_ms = (hours * 3600 + minutes * 60 + seconds) * 1000
+                self.player.setSource(QUrl.fromLocalFile(result.path))
+
+    def _media_loaded(self, status) -> None:
+        if status == QMediaPlayer.MediaStatus.LoadedMedia:
+            self.player.setPosition(self._preview_start_ms)
+
+    def _playback_position(self, position: int) -> None:
+        from .media import timestamp
+
+        if not self.seek_slider.isSliderDown():
+            self.seek_slider.setValue(position)
+        self.playback_time.setText(timestamp(position / 1000))
+
+    def _toggle_playback(self) -> None:
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        else:
+            self.player.play()
 
     def _selected(self) -> SearchResult | None:
         row = self.result_list.currentRow()
@@ -491,10 +774,16 @@ class MainWindow(QMainWindow):
                 self._cancel()
             event.ignore()
             return
+        self.player.stop()
+        self.device_probe.kill()
+        self.device_probe.waitForFinished(500)
+        self._device_directory.cleanup()
         event.accept()
 
 
 def main(paths: AppPaths | None = None) -> int:
+    ensure_standard_streams()
+    configure_native_libraries()
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("subject-to-change")

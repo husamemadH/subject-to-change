@@ -9,7 +9,16 @@ from threading import Event
 
 from .config import AppPaths, canonical_folders
 from .embeddings import Embedder, LocalEmbedder
-from .readers import MAX_FILE_BYTES, chunk_passage, read_document, walk_files
+from .media import MediaReadError, read_media
+from .readers import (
+    MAX_FILE_BYTES,
+    MAX_MEDIA_BYTES,
+    Passage,
+    chunk_passage,
+    media_kind,
+    read_document,
+    walk_files,
+)
 from .storage import SearchResult, Store
 
 
@@ -21,6 +30,16 @@ class IndexReport:
     skipped: int = 0
     cancelled: bool = False
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class IndexProgress:
+    phase: str
+    completed: int = 0
+    total: int = 0
+    filename: str = ""
+    passages_done: int = 0
+    passages_total: int = 0
 
 
 class Engine:
@@ -35,6 +54,7 @@ class Engine:
         semantic: bool = True,
         progress: Callable[[str], None] = lambda _: None,
         cancel: Event | None = None,
+        on_progress: Callable[[IndexProgress], None] = lambda _: None,
     ) -> IndexReport:
         cancel = cancel if cancel is not None else Event()
         roots = canonical_folders(folders)
@@ -57,16 +77,40 @@ class Engine:
         with Store(self.paths.database) as store:
             if semantic:
                 store.ensure_model(self.embedder.identity, self.embedder.dimensions)
+            candidates = []
+            on_progress(IndexProgress("Scanning folders"))
             for path in walk_files(roots, [data], scan_error, cancel.is_set):
+                candidates.append(path)
+                if len(candidates) % 100 == 0:
+                    progress(f"Scanning folders · {len(candidates)} files found")
+            total = len(candidates)
+
+            def update(phase: str, path: Path | None = None, done: int = 0, count: int = 0):
+                on_progress(
+                    IndexProgress(
+                        phase,
+                        report.indexed + report.unchanged + report.skipped,
+                        total,
+                        path.name if path else "",
+                        done,
+                        count,
+                    )
+                )
+
+            update("Indexing")
+            for path in candidates:
                 if cancel.is_set():
                     break
                 seen.add(str(path))
                 try:
                     info = path.stat(follow_symlinks=False)
-                    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
+                    kind = media_kind(path)
+                    size_limit = MAX_MEDIA_BYTES if kind in {"audio", "video"} else MAX_FILE_BYTES
+                    if not stat.S_ISREG(info.st_mode) or info.st_size > size_limit:
                         report.skipped += 1
                         # Do not keep old contents for files that are now excluded or too large.
                         store.forget([str(path)])
+                        update("Skipped", path)
                         continue
                     old = store.document(path)
                     same = (
@@ -75,11 +119,15 @@ class Engine:
                     embedded = old and old["embedded_identity"] == self.embedder.identity
                     if same and (not semantic or embedded):
                         report.unchanged += 1
+                        update("Unchanged", path)
                         continue
                     progress(f"Reading {path.name}")
+                    update("Reading", path)
                     # File-level atomic replacement means a cancelled run can be resumed safely.
                     passages = []
-                    for section in read_document(path):
+                    if kind:
+                        passages = [Passage(path.stem.replace("_", " "), kind.title())]
+                    for section in () if kind else read_document(path):
                         if cancel.is_set():
                             break
                         passages.extend(chunk_passage(section))
@@ -89,13 +137,34 @@ class Engine:
                     # A malformed or unreadable document must not stop the rest of the folder.
                     report.errors.append(f"{path.name}: {error}")
                     report.skipped += 1
+                    update("Skipped", path)
                     continue
                 # Model failures are job errors, not unreadable-file errors. Preserve the previous
                 # complete document and report the failure instead of silently skipping it.
                 vectors = None
-                if semantic and passages:
+                if semantic and kind:
+                    passages = []
+                    vectors = []
+                    try:
+                        for part in read_media(path, cancel.is_set):
+                            if cancel.is_set():
+                                break
+                            update(f"Embedding {kind}", path, part.number - 1, part.total)
+                            vector = self.embedder.encode_media(part.inputs)
+                            vectors.append(vector)
+                            passages.append(Passage(path.stem.replace("_", " "), part.location))
+                            update(f"Embedding {kind}", path, part.number, part.total)
+                    except MediaReadError as error:
+                        report.errors.append(f"{path.name}: {error}")
+                        report.skipped += 1
+                        update("Skipped", path)
+                        continue
+                    if cancel.is_set():
+                        break
+                elif semantic and passages:
                     progress(f"Embedding {path.name} ({len(passages)} passages)")
                     vectors = []
+                    update("Embedding", path, 0, len(passages))
                     for start in range(0, len(passages), 16):
                         if cancel.is_set():
                             break
@@ -104,6 +173,7 @@ class Engine:
                                 [passage.text for passage in passages[start : start + 16]]
                             )
                         )
+                        update("Embedding", path, len(vectors), len(passages))
                     if cancel.is_set():
                         break
                 try:
@@ -113,6 +183,7 @@ class Engine:
                 except (OSError, ValueError) as error:
                     report.errors.append(f"{path.name}: {error}")
                     report.skipped += 1
+                    update("Skipped", path)
                     continue
                 digest = hashlib.sha256(
                     "\n".join(p.text for p in passages).encode("utf-8")
@@ -130,10 +201,13 @@ class Engine:
                     self.embedder.dimensions,
                 )
                 report.indexed += 1
+                update("Indexed", path)
                 progress(f"Indexed {report.indexed} · unchanged {report.unchanged} · {path.name}")
             report.cancelled = cancel.is_set()
             if not report.cancelled:
+                update("Removing stale entries")
                 report.removed = store.prune(roots, seen, incomplete)
+            update("Stopped" if report.cancelled else "Finished")
         return report
 
     def search(self, query: str, *, semantic: bool = True, limit: int = 30) -> list[SearchResult]:

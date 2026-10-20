@@ -10,9 +10,82 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 
-TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".rst", ".log", ".csv", ".tsv"}
-EXTENSIONS = TEXT_EXTENSIONS | {".html", ".htm", ".docx", ".odt", ".pdf"}
+TEXT_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".markdown",
+    ".rst",
+    ".log",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".xml",
+    ".ini",
+    ".cfg",
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".css",
+    ".scss",
+    ".sql",
+    ".sh",
+    ".bash",
+    ".rs",
+    ".go",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".java",
+    ".kt",
+    ".swift",
+    ".rb",
+    ".php",
+    ".vue",
+    ".svelte",
+    ".ipynb",
+    ".tex",
+}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
+AUDIO_EXTENSIONS = {
+    ".wav",
+    ".mp3",
+    ".flac",
+    ".ogg",
+    ".opus",
+    ".m4a",
+    ".aac",
+    ".aiff",
+    ".aif",
+    ".wma",
+}
+VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mkv",
+    ".mov",
+    ".webm",
+    ".avi",
+    ".m4v",
+    ".mpeg",
+    ".mpg",
+    ".wmv",
+    ".mts",
+}
+EXTENSIONS = (
+    TEXT_EXTENSIONS
+    | IMAGE_EXTENSIONS
+    | AUDIO_EXTENSIONS
+    | VIDEO_EXTENSIONS
+    | {".html", ".htm", ".docx", ".odt", ".pdf"}
+)
 MAX_FILE_BYTES = 25 * 1024 * 1024
+MAX_MEDIA_BYTES = 2 * 1024 * 1024 * 1024
 MAX_TEXT_CHARS = 1_000_000
 MAX_PDF_PAGES = 500
 SKIP_DIRS = {
@@ -33,6 +106,17 @@ PRIVATE_NAMES = {"credentials", "credentials.json", "secrets.json", "id_rsa", "i
 class Passage:
     text: str
     location: str = ""
+
+
+def media_kind(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        return "image"
+    if suffix in AUDIO_EXTENSIONS:
+        return "audio"
+    if suffix in VIDEO_EXTENSIONS:
+        return "video"
+    return None
 
 
 def allowed(path: Path) -> bool:
