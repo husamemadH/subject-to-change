@@ -14,6 +14,7 @@ from typing import Protocol
 
 from .config import write_json
 from .device import ComputeDevice, detect_device
+from .model_runtime import configure_model_runtime
 
 
 @dataclass(frozen=True)
@@ -157,6 +158,7 @@ class LocalEmbedder:
         os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
         os.environ["DO_NOT_TRACK"] = "1"
         try:
+            configure_model_runtime()
             from sentence_transformers import SentenceTransformer
         except ImportError as error:
             raise ModelUnavailable(

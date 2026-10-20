@@ -56,7 +56,8 @@ class OfflineTests(unittest.TestCase):
         with self.assertRaisesRegex(ModelUnavailable, "damaged"):
             verify_model(self.folder)
 
-    def test_model_load_on_gpu_failure_retries_on_cpu_and_reports_it(self) -> None:
+    @patch("subject_to_change.embeddings.configure_model_runtime")
+    def test_model_load_on_gpu_failure_retries_on_cpu_and_reports_it(self, _configure) -> None:
         from unittest.mock import Mock
 
         from subject_to_change.device import ComputeDevice
@@ -87,7 +88,8 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual(embedder.device.name, "cpu")
         self.assertIn("GPU could not load", labels[-1])
 
-    def test_runtime_is_local_only_and_uses_gemma_retrieval_prompts(self) -> None:
+    @patch("subject_to_change.embeddings.configure_model_runtime")
+    def test_runtime_is_local_only_and_uses_gemma_retrieval_prompts(self, _configure) -> None:
         fixture_model(self.folder)
         calls = []
 

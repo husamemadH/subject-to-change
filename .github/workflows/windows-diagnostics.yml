@@ -27,6 +27,8 @@ jobs:
           faulthandler.enable()
           from subject_to_change.runtime import configure_native_libraries
           configure_native_libraries()
+          from subject_to_change.model_runtime import configure_model_runtime
+          configure_model_runtime()
           import torch
           from sentence_transformers import SentenceTransformer
           from PIL import Image
@@ -50,7 +52,7 @@ jobs:
       - name: Compare CPU backends in separate processes
         shell: pwsh
         run: |
-          foreach ($mode in @('default', 'eager', 'no-mkldnn', 'one-thread')) {
+          foreach ($mode in @('default')) {
             Write-Output "PROFILE $mode"
             uv run --frozen --extra model python -u build/diagnose.py $mode *> "build/$mode.log"
             Write-Output "EXIT $LASTEXITCODE"
