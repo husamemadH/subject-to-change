@@ -56,7 +56,7 @@ class EngineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        base = Path(self.temp.name)
+        base = Path(self.temp.name).resolve()
         self.root = base / "files"
         self.root.mkdir()
         self.paths = AppPaths(base / "data")

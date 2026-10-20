@@ -25,7 +25,7 @@ jobs:
           enable-cache: true
       - name: Install Linux Qt and media libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libpulse0 ffmpeg
       - name: Prepare Windows media DLLs
         if: runner.os == 'Windows'
         run: uv run --no-project python packaging/prepare_ffmpeg.py

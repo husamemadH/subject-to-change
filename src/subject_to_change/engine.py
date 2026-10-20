@@ -70,7 +70,10 @@ class Engine:
         def scan_error(error: OSError) -> None:
             report.errors.append(str(error))
             if error.filename:
-                incomplete.append(Path(error.filename).absolute())
+                try:
+                    incomplete.append(Path(error.filename).resolve())
+                except OSError:
+                    incomplete.extend(roots)
             else:
                 incomplete.extend(roots)
 

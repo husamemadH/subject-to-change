@@ -11,8 +11,9 @@ cd subject-to-change
 uv sync --extra model
 ```
 
-Audio/video requires FFmpeg shared libraries. On Linux, install your distribution's `ffmpeg`
-package. On Windows, run this once to download and configure the shared DLLs:
+Audio/video requires FFmpeg shared libraries. On Ubuntu, run
+`sudo apt install ffmpeg libegl1 libopengl0 libpulse0`; on other Linux distributions, install the
+equivalent packages. On Windows, run this once to download and configure the shared DLLs:
 
 ```powershell
 uv run --no-project python packaging/prepare_ffmpeg.py

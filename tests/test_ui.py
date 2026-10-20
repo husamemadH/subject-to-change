@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -108,7 +109,7 @@ with Store(paths.database) as store:
         self.assertEqual(len(results), 1)
         import sqlite3
 
-        with sqlite3.connect(self.window.paths.database) as connection:
+        with closing(sqlite3.connect(self.window.paths.database)) as connection:
             self.assertNotEqual(
                 connection.execute("SELECT digest FROM documents").fetchone()[0], "uncommitted"
             )

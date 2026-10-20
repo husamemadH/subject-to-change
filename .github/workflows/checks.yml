@@ -27,7 +27,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install Qt system libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libpulse0
       - run: python -m pip install -e ".[dev]"
       - run: ruff check .
       - run: ruff format --check .
@@ -51,7 +51,7 @@ jobs:
           python-version: '3.12'
       - name: Install Linux Qt and media libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libpulse0 ffmpeg
       - name: Prepare Windows media DLLs
         if: runner.os == 'Windows'
         run: |
