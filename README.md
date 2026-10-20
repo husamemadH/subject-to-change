@@ -7,7 +7,9 @@ Download the Linux `.AppImage` or Windows `Setup.exe` from
 [GitHub Releases](https://github.com/husamemadH/subject-to-change/releases/latest).
 On Linux, make the AppImage executable and open it; if FUSE is unavailable, run
 `APPIMAGE_EXTRACT_AND_RUN=1 ./Subject-to-Change-*.AppImage`. On Windows, run the installer.
-Python and FFmpeg are included; the model downloads separately on first use.
+On first launch, click **Download and set up** to install the verified search runtime
+(about 3 GB, including GPU support and FFmpeg). Then open the app normally. Existing models
+are reused; otherwise click **Download model** once. No Python installation is needed.
 
 To run from source, install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 
@@ -58,8 +60,10 @@ uv run --extra model --extra package python packaging/release.py --format window
 ```
 
 The **Desktop packages** GitHub Actions workflow builds and checks both formats, including
-real model inference, and stages a draft release when publishing is enabled or a `v*` tag
-is pushed. Release downloads include GPU support, CPU fallback, FFmpeg, and SHA-256 checksums.
+real model inference and runtime installation, and stages a draft release when publishing is enabled or a `v*` tag
+is pushed. The AppImage and installer download the matching runtime parts from the same release during
+first setup. Keep the `.bin` release assets available; users only need to download the
+AppImage or installer themselves. SHA-256 checksums are verified before extraction.
 
 Run tests:
 

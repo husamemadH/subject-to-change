@@ -87,6 +87,8 @@ jobs:
         if: runner.os == 'Linux'
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
+          SUBJECT_TO_CHANGE_RUNTIME_ASSETS: ${{ github.workspace }}/release
+          SUBJECT_TO_CHANGE_RUNTIME_CACHE: ${{ runner.temp }}/subject-to-change-runtime
           SUBJECT_TO_CHANGE_SMOKE_MODEL: ${{ github.workspace }}/build/check-model
         run: |
           appimages=(release/*.AppImage)
@@ -94,13 +96,15 @@ jobs:
       - name: Install Windows release and check real inference
         if: runner.os == 'Windows'
         env:
+          SUBJECT_TO_CHANGE_RUNTIME_ASSETS: ${{ github.workspace }}/release
+          SUBJECT_TO_CHANGE_RUNTIME_CACHE: ${{ runner.temp }}/subject-to-change-runtime
           SUBJECT_TO_CHANGE_SMOKE_MODEL: ${{ github.workspace }}/build/check-model
         run: |
           $installer = Get-ChildItem release/*-Setup.exe | Select-Object -First 1
           $install = Join-Path $env:RUNNER_TEMP 'Subject to Change installed'
           $process = Start-Process -FilePath $installer.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$install`"") -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)" }
-          uv run --frozen --extra model --extra package python packaging/check.py --executable "$install/subject-to-change.exe" --media
+          uv run --frozen --extra model --extra package python packaging/check.py --executable "$install/subject-to-change-setup.exe" --media
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
@@ -130,4 +134,4 @@ jobs:
           cd release
           cat *.sha256 > SHA256SUMS
           sha256sum --check SHA256SUMS
-          gh release create "$RELEASE_TAG" *.AppImage *.exe SHA256SUMS --draft --target "$GITHUB_SHA" --title "Subject to Change $RELEASE_TAG" --notes-file ../packaging/release-notes.md
+          gh release create "$RELEASE_TAG" *.AppImage *.exe *.bin SHA256SUMS --draft --target "$GITHUB_SHA" --title "Subject to Change $RELEASE_TAG" --notes-file ../packaging/release-notes.md

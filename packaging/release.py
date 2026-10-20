@@ -9,6 +9,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tarfile
 import tempfile
 import tomllib
 import urllib.request
@@ -56,6 +58,117 @@ def download_asset(repo: str, name: str, destination: Path) -> Path:
     return destination
 
 
+class PartWriter:
+    def __init__(self, output: Path, prefix: str):
+        self.output = output
+        self.prefix = prefix
+        self.stream = None
+        self.parts = []
+        self.position = 0
+        self.limit = 1536 * 1024**2
+
+    def write(self, data):
+        written = len(data)
+        view = memoryview(data)
+        while view:
+            if self.stream is None or self.stream.tell() == self.limit:
+                self.close()
+                target = self.output / f"{self.prefix}-{len(self.parts) + 1:03}.bin"
+                self.parts.append(target)
+                self.stream = target.open("wb")
+            count = min(len(view), self.limit - self.stream.tell())
+            self.stream.write(view[:count])
+            self.position += count
+            view = view[count:]
+        return written
+
+    def tell(self):
+        return self.position
+
+    def flush(self):
+        if self.stream is not None:
+            self.stream.flush()
+
+    def close(self):
+        if self.stream is not None:
+            self.stream.close()
+            self.stream = None
+
+
+def prepare_setup(payload: Path, output: Path, release_version: str, platform: str) -> Path:
+    prefix = f"Subject-to-Change-{release_version}-{platform}-runtime"
+    for stale in output.glob(prefix + "-*.bin*"):
+        stale.unlink()
+    writer = PartWriter(output, prefix)
+    unpacked_size = 0
+    try:
+        with tarfile.open(
+            fileobj=writer, mode="w|gz", compresslevel=6, dereference=False
+        ) as archive:
+            for path in sorted(payload.rglob("*")):
+                archive.add(path, arcname=path.relative_to(payload).as_posix(), recursive=False)
+                if path.is_file() and not path.is_symlink():
+                    unpacked_size += path.stat().st_size
+    finally:
+        writer.close()
+    parts = []
+    for part in writer.parts:
+        checksum(part)
+        with part.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        parts.append(
+            {
+                "name": part.name,
+                "size": part.stat().st_size,
+                "sha256": digest,
+                "url": f"https://github.com/husamemadH/subject-to-change/releases/download/"
+                f"v{release_version}/{part.name}",
+            }
+        )
+    manifest = ROOT / "build/runtime.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": release_version,
+                "unpacked_size": unpacked_size,
+                "executable": "subject-to-change.exe"
+                if platform == "windows-x64"
+                else "subject-to-change",
+                "parts": parts,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "PyInstaller",
+            "--noconfirm",
+            "--clean",
+            "--windowed",
+            "--onedir",
+            "--name",
+            "subject-to-change-setup",
+            "--exclude-module",
+            "torch",
+            "--exclude-module",
+            "transformers",
+            "--exclude-module",
+            "sentence_transformers",
+            "--add-data",
+            f"{manifest}{os.pathsep}.",
+            "--add-data",
+            f"{ROOT / 'src/subject_to_change/icon.svg'}{os.pathsep}.",
+            str(ROOT / "packaging/bootstrap.py"),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    return ROOT / "dist/subject-to-change-setup"
+
+
 def appimage(payload: Path, output: Path, release_version: str) -> Path:
     appdir = ROOT / "build/Subject-to-Change.AppDir"
     if appdir.exists():
@@ -66,7 +179,7 @@ def appimage(payload: Path, output: Path, release_version: str) -> Path:
     (appdir / "AppRun").write_text(
         "#!/bin/sh\n"
         'HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
-        'exec "$HERE/app/subject-to-change" "$@"\n',
+        'exec "$HERE/app/subject-to-change-setup" "$@"\n',
         encoding="utf-8",
     )
     (appdir / "AppRun").chmod(0o755)
@@ -101,7 +214,7 @@ def appimage(payload: Path, output: Path, release_version: str) -> Path:
             "--mksquashfs-opt",
             "-Xcompression-level",
             "--mksquashfs-opt",
-            "22",
+            "15",
             "--mksquashfs-opt",
             "-b",
             "--mksquashfs-opt",
@@ -162,6 +275,12 @@ def main() -> None:
         raise FileNotFoundError("Build the frozen application with packaging/build.py first")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    payload = prepare_setup(
+        payload,
+        output,
+        release_version,
+        "windows-x64" if args.format == "windows" else "linux-x86_64",
+    )
     artifact = (
         appimage(payload, output, release_version)
         if args.format == "appimage"

@@ -20,7 +20,7 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 LZMAUseSeparateProcess=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\subject-to-change.exe
+UninstallDisplayIcon={app}\subject-to-change-setup.exe
 CloseApplications=yes
 RestartApplications=no
 
@@ -31,8 +31,8 @@ Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 Source: "{#AppSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Subject to Change"; Filename: "{app}\subject-to-change.exe"
-Name: "{autodesktop}\Subject to Change"; Filename: "{app}\subject-to-change.exe"; Tasks: desktopicon
+Name: "{group}\Subject to Change"; Filename: "{app}\subject-to-change-setup.exe"
+Name: "{autodesktop}\Subject to Change"; Filename: "{app}\subject-to-change-setup.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\subject-to-change.exe"; Description: "Launch Subject to Change"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\subject-to-change-setup.exe"; Description: "Launch Subject to Change"; Flags: nowait postinstall skipifsilent
