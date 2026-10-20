@@ -199,7 +199,7 @@ class IndexTask(Task):
                             diagnostics.seek(0)
                             detail = diagnostics.read().decode(errors="replace")[-2000:]
                             self.failed.emit(
-                                detail or f"Indexing process exited ({process.returncode})"
+                                f"Indexing process exited ({process.returncode})\n{detail}".strip()
                             )
                     finally:
                         if process is not None:

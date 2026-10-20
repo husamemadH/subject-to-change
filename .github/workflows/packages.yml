@@ -58,8 +58,6 @@ jobs:
         run: uv sync --frozen --extra model --extra package
       - name: Free package download cache
         run: uv cache clean
-      - name: Build frozen application
-        run: uv run --frozen --extra model --extra package python packaging/build.py
       - name: Download model for isolated inference checks (not included in release)
         env:
           HF_HUB_OFFLINE: '0'
@@ -67,6 +65,18 @@ jobs:
           uv run --frozen --extra model --extra package python -c
           "from pathlib import Path; from subject_to_change.embeddings import download_model;
           download_model(Path('build/check-model'))"
+      - name: Check source inference before packaging
+        env:
+          SUBJECT_TO_CHANGE_SMOKE_MODEL: ${{ github.workspace }}/build/check-model
+        run: >-
+          uv run --frozen --extra model --extra package python -m subject_to_change.launch
+          --smoke-test build/source-check.json --media
+      - name: Show source inference result
+        if: always()
+        shell: bash
+        run: if [ -f build/source-check.json ]; then cat build/source-check.json; fi
+      - name: Build frozen application
+        run: uv run --frozen --extra model --extra package python packaging/build.py
       - name: Check full frozen runtime
         env:
           SUBJECT_TO_CHANGE_SMOKE_MODEL: ${{ github.workspace }}/build/check-model
