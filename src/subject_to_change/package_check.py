@@ -149,6 +149,7 @@ def main(result_path: Path, *, media: bool = False) -> int:
                     for source in (image_path, audio, video):
                         shutil.copyfile(source, inputs / source.name)
                     window.keyword_only.setChecked(False)
+                    window._last_report = None
                     window._index()
                     wait_for(lambda: window.task is None, timeout=600)
                     report = window._last_report
