@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import traceback
 from pathlib import Path
 
@@ -13,6 +14,10 @@ from .readers import media_kind
 def main(request: Path, result: Path) -> int:
     report = {}
     try:
+        if os.environ.get("SUBJECT_TO_CHANGE_SMOKE_MODEL"):
+            from sentence_transformers import SentenceTransformer
+
+            report["embedding_runtime"] = SentenceTransformer.__name__
         for filename in json.loads(request.read_text(encoding="utf-8")):
             path = Path(filename)
             parts = list(read_media(path))
