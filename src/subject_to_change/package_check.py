@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -134,6 +135,32 @@ def main(result_path: Path, *, media: bool = False) -> int:
                 assert checked.returncode == 0 and decoded["ok"], decoded
                 assert all(decoded[kind] == 1 for kind in ("image", "audio", "video")), decoded
                 result["media_decoding"] = True
+                if model_folder := os.environ.get("SUBJECT_TO_CHANGE_SMOKE_MODEL"):
+                    from .embeddings import MARKER, REQUIRED_FILES
+
+                    for filename in (*REQUIRED_FILES, MARKER):
+                        source = Path(model_folder) / filename
+                        target = paths.model / filename
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            os.link(source.resolve(), target)
+                        except OSError:
+                            shutil.copyfile(source, target)
+                    for source in (image_path, audio, video):
+                        shutil.copyfile(source, inputs / source.name)
+                    window.keyword_only.setChecked(False)
+                    window._index()
+                    wait_for(lambda: window.task is None, timeout=600)
+                    report = window._last_report
+                    assert report is not None, window.error.text()
+                    assert report.indexed == 5 and report.skipped == 0, report
+                    result["semantic_indexing"] = True
+                    window.query.setText("An invoice that is due for payment")
+                    window._search()
+                    wait_for(lambda: window.task is None, timeout=180)
+                    assert window.result_list.count() > 0, window.error.text()
+                    result["semantic_search"] = True
+                    result["inference_device"] = window.device_label.text()
             window.close()
             window = None
         result["ok"] = True

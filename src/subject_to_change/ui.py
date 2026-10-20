@@ -13,6 +13,7 @@ from PySide6.QtGui import (
     QCloseEvent,
     QDesktopServices,
     QFont,
+    QIcon,
     QImageReader,
     QKeySequence,
     QPixmap,
@@ -786,6 +787,8 @@ def main(paths: AppPaths | None = None) -> int:
     configure_native_libraries()
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setApplicationName(APP_NAME)
+    app.setDesktopFileName("subject-to-change")
+    app.setWindowIcon(QIcon(str(Path(__file__).with_name("icon.svg"))))
     app.setOrganizationName("subject-to-change")
     app.setFont(QFont("Sans Serif", 10))
     app.setStyleSheet(STYLE)

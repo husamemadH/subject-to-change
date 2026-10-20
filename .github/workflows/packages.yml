@@ -1,7 +1,17 @@
 name: Desktop packages
 
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Create a draft GitHub release after both packages pass
+        type: boolean
+        default: false
+      tag:
+        description: Release tag (must match pyproject.toml)
+        default: v0.1.0
 
 permissions:
   contents: read
@@ -11,31 +21,103 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest]
+        include:
+          - os: ubuntu-22.04
+            format: appimage
+          - os: windows-latest
+            format: windows
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     env:
       QT_QPA_PLATFORM: offscreen
       HF_HUB_OFFLINE: '1'
       HF_HUB_DISABLE_TELEMETRY: '1'
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+      - name: Make room for GPU libraries on the hosted Linux runner
+        if: runner.os == 'Linux'
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.12'
-          enable-cache: true
-      - name: Install Linux Qt and media libraries
+          enable-cache: false
+      - name: Install Linux Qt and packaging libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libpulse0 ffmpeg
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libegl1 libopengl0 libpulse0 libxcb-cursor0 libxkbcommon-x11-0
+          ffmpeg squashfs-tools desktop-file-utils
       - name: Prepare Windows media DLLs
         if: runner.os == 'Windows'
-        run: uv run --no-project python packaging/prepare_ffmpeg.py
+        run: |
+          uv run --no-project python packaging/prepare_ffmpeg.py
+          (Resolve-Path packaging/vendor/ffmpeg/bin).Path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Install GPU-capable inference runtime and packaging tools
         run: uv sync --frozen --extra model --extra package
-      - run: uv run --frozen --extra model --extra package python packaging/build.py
-      - name: Test frozen launcher, indexing, Stop, resume, device probe and media decoders
+      - name: Free package download cache
+        run: uv cache clean
+      - name: Build frozen application
+        run: uv run --frozen --extra model --extra package python packaging/build.py
+      - name: Download model for isolated inference checks (not included in release)
+        env:
+          HF_HUB_OFFLINE: '0'
+        run: >-
+          uv run --frozen --extra model --extra package python -c
+          "from pathlib import Path; from subject_to_change.embeddings import download_model;
+          download_model(Path('build/check-model'))"
+      - name: Check full frozen runtime
+        env:
+          SUBJECT_TO_CHANGE_SMOKE_MODEL: ${{ github.workspace }}/build/check-model
         run: uv run --frozen --extra model --extra package python packaging/check.py --media
+      - name: Create release package and checksum
+        run: uv run --frozen --extra model --extra package python packaging/release.py --format ${{ matrix.format }}
+      - name: Check AppImage launcher, helpers and real inference
+        if: runner.os == 'Linux'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          SUBJECT_TO_CHANGE_SMOKE_MODEL: ${{ github.workspace }}/build/check-model
+        run: |
+          appimages=(release/*.AppImage)
+          uv run --frozen --extra model --extra package python packaging/check.py --executable "${appimages[0]}" --media
+      - name: Install Windows release and check real inference
+        if: runner.os == 'Windows'
+        env:
+          SUBJECT_TO_CHANGE_SMOKE_MODEL: ${{ github.workspace }}/build/check-model
+        run: |
+          $installer = Get-ChildItem release/*-Setup.exe | Select-Object -First 1
+          $install = Join-Path $env:RUNNER_TEMP 'Subject to Change installed'
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$install`"") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)" }
+          uv run --frozen --extra model --extra package python packaging/check.py --executable "$install/subject-to-change.exe" --media
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
-          name: subject-to-change-${{ runner.os }}
-          path: dist/subject-to-change/
+          name: subject-to-change-${{ matrix.format }}
+          path: release/
+          compression-level: 0
           if-no-files-found: error
+
+  release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: subject-to-change-*
+          merge-multiple: true
+          path: release
+      - name: Verify checksums and stage release
+        run: |
+          cd release
+          cat *.sha256 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          gh release create "$RELEASE_TAG" *.AppImage *.exe SHA256SUMS --draft --target "$GITHUB_SHA" --title "Subject to Change $RELEASE_TAG" --notes-file ../packaging/release-notes.md

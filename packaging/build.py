@@ -30,6 +30,10 @@ def main() -> None:
         str(root / "src"),
         "--hidden-import",
         "pypdf",
+        "--exclude-module",
+        "triton",
+        "--add-data",
+        f"{root / 'src/subject_to_change/icon.svg'}{os.pathsep}subject_to_change",
     ]
     if args.without_model:
         for package in (

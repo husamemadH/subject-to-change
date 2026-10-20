@@ -24,7 +24,9 @@ def main() -> None:
         if args.media:
             command.append("--media")
         completed = subprocess.run(
-            command, timeout=180, env={**os.environ, "QT_QPA_PLATFORM": "offscreen"}
+            command,
+            timeout=900 if os.environ.get("SUBJECT_TO_CHANGE_SMOKE_MODEL") else 180,
+            env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
         )
         if not report.exists():
             raise RuntimeError(

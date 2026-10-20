@@ -3,7 +3,13 @@
 Search local images, video, audio, documents, and code with Google EmbeddingGemma 2.
 Embeddings and searches run offline after the model is downloaded.
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
+Download the Linux `.AppImage` or Windows `Setup.exe` from
+[GitHub Releases](https://github.com/husamemadH/subject-to-change/releases/latest).
+On Linux, make the AppImage executable and open it; if FUSE is unavailable, run
+`APPIMAGE_EXTRACT_AND_RUN=1 ./Subject-to-Change-*.AppImage`. On Windows, run the installer.
+Python and FFmpeg are included; the model downloads separately on first use.
+
+To run from source, install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 
 ```sh
 git clone https://github.com/husamemadH/subject-to-change.git
@@ -42,9 +48,18 @@ uv run --extra model --extra package python packaging/build.py
 uv run --extra model --extra package python packaging/check.py --media
 ```
 
-Keep the entire `dist/subject-to-change` folder together. On Windows, open
-`subject-to-change.exe`; the package includes FFmpeg DLLs but downloads the model separately.
-Windows CI checks are configured; native Windows validation is still pending.
+Keep the entire `dist/subject-to-change` folder together, or wrap it as a release download:
+
+```sh
+# Linux (requires squashfs-tools and desktop-file-utils)
+uv run --extra model --extra package python packaging/release.py --format appimage
+# Windows (requires Inno Setup 6)
+uv run --extra model --extra package python packaging/release.py --format windows
+```
+
+The **Desktop packages** GitHub Actions workflow builds and checks both formats, including
+real model inference, and stages a draft release when publishing is enabled or a `v*` tag
+is pushed. Release downloads include GPU support, CPU fallback, FFmpeg, and SHA-256 checksums.
 
 Run tests:
 
