@@ -32,6 +32,8 @@ def main() -> None:
         "pypdf",
         "--exclude-module",
         "triton",
+        "--additional-hooks-dir",
+        str(root / "packaging/hooks"),
         "--add-data",
         f"{root / 'src/subject_to_change/icon.svg'}{os.pathsep}subject_to_change",
     ]
@@ -48,6 +50,8 @@ def main() -> None:
         ):
             command += ["--exclude-module", package]
     else:
+        if sys.platform == "linux":
+            command += ["--hidden-import", "nvidia.cu13"]
         for package in (
             "sentence_transformers",
             "transformers",
